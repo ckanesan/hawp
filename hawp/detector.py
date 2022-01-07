@@ -12,7 +12,7 @@ PRETRAINED = {
 }
 
 def non_maximum_suppression(a):
-    ap = F.max_pool2d(a, 3, stride=(1,1), padding=(1,1))
+    ap = F.max_pool2d(a, 3, stride=1, padding=1)
     mask = (a == ap).float().clamp(min=0.0)
     return a * mask
 
@@ -117,11 +117,8 @@ class WireframeDetector(nn.Module):
         else:
             lines_pred = self.proposal_lines_new(md_pred[0], dis_pred[0], None).view(-1, 4)
 
-        #jloc_pred_nms = non_maximum_suppression(jloc_pred[0])
-        #topK = torch.clamp((jloc_pred_nms > 0.008).count_nonzero(), max=300)
-
         nms_jloc_pred = non_maximum_suppression(jloc_pred)[0]
-        juncs_pred, _ = get_junctions(nms_jloc_pred,joff_pred[0], topk=300, th=0.008)
+        juncs_pred, _ = get_junctions(nms_jloc_pred, joff_pred[0], topk=300, th=0.008)
         extra_info['time_proposal'] = time.time() - extra_info['time_proposal']
         extra_info['time_matching'] = time.time()
         dis_junc_to_end1, idx_junc_to_end1 = torch.sum((lines_pred[:,:2]-juncs_pred[:,None])**2,dim=-1).min(0)
@@ -196,7 +193,7 @@ class WireframeDetector(nn.Module):
         cs_ed = torch.cos(ed_).clamp(min=1e-3)
         ss_ed = torch.sin(ed_).clamp(max=-1e-3)
 
-        x_standard = torch.ones_like(cs_st)
+        #x_standard = torch.ones_like(cs_st)
 
         y_st = ss_st/cs_st
         y_ed = ss_ed/cs_ed
