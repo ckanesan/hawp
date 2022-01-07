@@ -21,7 +21,10 @@ def get_junctions(jloc, joff, topk = 300, th=0):
     jloc = jloc.reshape(-1)
     joff = joff.reshape(2, -1)
 
-    scores, index = torch.topk(jloc, k=topk)
+    #scores, index = torch.topk(jloc, k=topk)
+    jloc_sorted, jloc_index = jloc.sort(descending=True)
+    scores = jloc_sorted[:topk]
+    index = jloc_index[:topk]
     y = (index // width).float() + torch.gather(joff[1], 0, index) + 0.5
     x = (index % width).float() + torch.gather(joff[0], 0, index) + 0.5
 
@@ -61,6 +64,7 @@ class WireframeDetector(nn.Module):
             nn.Linear(self.dim_fc, 1),
         )
         self.train_step = 0
+        self.export_mode = False
 
     def pooling(self, features_per_image, lines_per_im):
         h,w = features_per_image.size(1), features_per_image.size(2)
@@ -107,27 +111,24 @@ class WireframeDetector(nn.Module):
         joff_pred= output[:,7:9].sigmoid() - 0.5
         extra_info['time_backbone'] = time.time() - extra_info['time_backbone']
 
-
-        batch_size = md_pred.size(0)
-        assert batch_size == 1
-
         extra_info['time_proposal'] = time.time()
         if self.use_residual:
             lines_pred = self.proposal_lines_new(md_pred[0],dis_pred[0],res_pred[0]).view(-1,4)
         else:
             lines_pred = self.proposal_lines_new(md_pred[0], dis_pred[0], None).view(-1, 4)
 
-        jloc_pred_nms = non_maximum_suppression(jloc_pred[0])
-        topK = min(300, int((jloc_pred_nms>0.008).float().sum().item()))
-
-        juncs_pred, _ = get_junctions(non_maximum_suppression(jloc_pred[0]),joff_pred[0], topk=topK)
+        nms_jloc_pred = non_maximum_suppression(jloc_pred)[0]
+        juncs_pred, _ = get_junctions(nms_jloc_pred, joff_pred[0], topk=300, th=0.008)
         extra_info['time_proposal'] = time.time() - extra_info['time_proposal']
         extra_info['time_matching'] = time.time()
         dis_junc_to_end1, idx_junc_to_end1 = torch.sum((lines_pred[:,:2]-juncs_pred[:,None])**2,dim=-1).min(0)
         dis_junc_to_end2, idx_junc_to_end2 = torch.sum((lines_pred[:,2:] - juncs_pred[:, None]) ** 2, dim=-1).min(0)
 
-        idx_junc_to_end_min = torch.min(idx_junc_to_end1,idx_junc_to_end2)
-        idx_junc_to_end_max = torch.max(idx_junc_to_end1,idx_junc_to_end2)
+        # idx_junc_to_end_min = torch.min(idx_junc_to_end1,idx_junc_to_end2)
+        # idx_junc_to_end_max = torch.max(idx_junc_to_end1,idx_junc_to_end2)
+        idx_junc_to_end_stacked = torch.stack((idx_junc_to_end1, idx_junc_to_end2))
+        idx_junc_to_end_min = idx_junc_to_end_stacked.min(dim=0)[0]
+        idx_junc_to_end_max = idx_junc_to_end_stacked.max(dim=0)[0]
 
         iskeep = (idx_junc_to_end_min < idx_junc_to_end_max)# * (dis_junc_to_end1< 10*10)*(dis_junc_to_end2<10*10)  # *(dis_junc_to_end2<100)
 
@@ -155,10 +156,13 @@ class WireframeDetector(nn.Module):
             v2e_idx1 = v2e_dis1.argmin(dim=0)
             v2e_idx2 = v2e_dis2.argmin(dim=0)
             edge_indices = torch.stack((v2e_idx1,v2e_idx2)).t()
-            wireframe = WireframeGraph(juncs_final,juncs_score,edge_indices,score_final,output.size(3),output.size(2))
 
-            wireframe.rescale(annotations[0]['width'],annotations[0]['height'])
-        
+            if not self.export_mode:
+                wireframe = WireframeGraph(juncs_final,juncs_score,edge_indices,score_final,output.size(3),output.size(2))
+                wireframe.rescale(annotations[0]['width'],annotations[0]['height'])
+            else:
+                return juncs_final,juncs_score,edge_indices,score_final,output.size(3),output.size(2)
+
         extra_info['time_verification'] = time.time() - extra_info['time_verification']
 
         return wireframe, extra_info
@@ -189,7 +193,7 @@ class WireframeDetector(nn.Module):
         cs_ed = torch.cos(ed_).clamp(min=1e-3)
         ss_ed = torch.sin(ed_).clamp(max=-1e-3)
 
-        x_standard = torch.ones_like(cs_st)
+        #x_standard = torch.ones_like(cs_st)
 
         y_st = ss_st/cs_st
         y_ed = ss_ed/cs_ed

@@ -2,6 +2,7 @@ import pdb
 import torch
 from hawp import show
 from hawp.config import cfg
+from hawp.graph import WireframeGraph
 from hawp.utils.comm import to_device
 from hawp.dataset.build import build_transform
 
@@ -18,14 +19,18 @@ from . import visualizer
 class WireframeParser(object):
     loader_workers = None
     device = 'cuda'
-    def __init__(self, json_data = False, 
+    def __init__(self, json_data = False,
                        visualize_image = False,
-                       visualize_processed_image = False):
+                       visualize_processed_image = False,
+                       export_mode = False):
         self.model = get_hawp_model(pretrained=True).eval()
         self.model = self.model.to(self.device)
+        self.model.export_mode = export_mode
         self.preprocessor_transform = build_transform(cfg)
         self.visualize_image = visualize_image
         self.visualize_processed_image = visualize_processed_image
+        self.inputs = []
+        self.outputs = []
 
     def dataset(self, data):
         loader_workers = self.loader_workers
@@ -51,7 +56,13 @@ class WireframeParser(object):
                 visualizer.Base.image(image_batch[0])
             processed_image_batch = processed_image_batch.to(self.device)
             with torch.no_grad():
-                wireframe, _ = self.model(processed_image_batch, meta_batch)
+                if self.model.export_mode:
+                    self.inputs.append((processed_image_batch, meta_batch))
+                    output = self.model(processed_image_batch, meta_batch)
+                    self.outputs.append(output)
+                    wireframe = WireframeGraph(*output)
+                else:
+                    wireframe, _ = self.model(processed_image_batch, meta_batch)
 
             yield wireframe, gt_anns_batch[0], meta_batch[0]
 
