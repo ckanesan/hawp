@@ -5,12 +5,12 @@ import torch
 
 class WireframeGraph:
     def __init__(self, 
-                vertices: torch.Tensor, 
-                v_confidences: torch.Tensor,
-                edges: torch.Tensor, 
-                edge_weights: torch.Tensor, 
-                frame_width: int, 
-                frame_height: int):
+                vertices: torch.Tensor,
+                v_confidences: torch.Tensor = torch.empty((0,), dtype=torch.float32),
+                edges: torch.Tensor = torch.empty((0, 2), dtype=torch.long),
+                edge_weights: torch.Tensor = torch.empty((0,), dtype=torch.float32),
+                frame_width: torch.Tensor = torch.empty((0,), dtype=torch.int32),
+                frame_height: torch.Tensor = torch.empty((0,), dtype=torch.int32)):
         self.vertices = vertices
         self.v_confidences = v_confidences
         self.edges = edges

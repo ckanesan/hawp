@@ -35,13 +35,13 @@ def check_model(model_file):
 
 
 def verify_model(model_file, input, output):
-    ort_session = ort.InferenceSession(model_file, providers=["CUDAExecutionProvider"])
+    ort_session = ort.InferenceSession(model_file, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     ort_inputs = {"image": to_numpy(input)}
     ort_outs = ort_session.run(None, ort_inputs)
 
     # compare ONNX Runtime and PyTorch results
-    for obs, exp in zip(ort_outs, output):
-        np.testing.assert_allclose(to_numpy(exp), obs, rtol=1e-03, atol=1e-05)
+    for idx, (obs, exp) in enumerate(zip(ort_outs, output)):
+        np.testing.assert_allclose(to_numpy(exp), obs, rtol=1e-03, atol=1e-05, err_msg=f"Failed tensor {idx}")
 
 
 def export(input_file, output_file):
@@ -60,9 +60,7 @@ def export(input_file, output_file):
         "frame_width",
         "frame_height",
     ]
-    torch.onnx.export(
-        model, input, output_file, opset_version=11, input_names=["image"], output_names=output_names
-    )
+    torch.onnx.export(model, input, output_file, opset_version=11, input_names=["image"], output_names=output_names)
 
     return input, output
 

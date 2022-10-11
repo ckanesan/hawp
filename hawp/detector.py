@@ -91,14 +91,6 @@ class WireframeDetector(nn.Module):
     def forward(self, images, annotations = None):
         device = images.device
 
-        extra_info = {
-            'time_backbone': 0.0,
-            'time_proposal': 0.0,
-            'time_matching': 0.0,
-            'time_verification': 0.0,
-        }
-
-        extra_info['time_backbone'] = time.time()
         outputs, features = self.backbone(images)
 
         loi_features = self.fc1(features)
@@ -109,20 +101,26 @@ class WireframeDetector(nn.Module):
         res_pred = output[:,4:5].sigmoid()
         jloc_pred= output[:,5:7].softmax(1)[:,1:]
         joff_pred= output[:,7:9].sigmoid() - 0.5
-        extra_info['time_backbone'] = time.time() - extra_info['time_backbone']
 
-        extra_info['time_proposal'] = time.time()
         if self.use_residual:
             lines_pred = self.proposal_lines_new(md_pred[0],dis_pred[0],res_pred[0]).view(-1,4)
         else:
             lines_pred = self.proposal_lines_new(md_pred[0], dis_pred[0], None).view(-1, 4)
 
         nms_jloc_pred = non_maximum_suppression(jloc_pred)[0]
-        juncs_pred, _ = get_junctions(nms_jloc_pred, joff_pred[0], topk=300, th=0.008)
-        extra_info['time_proposal'] = time.time() - extra_info['time_proposal']
-        extra_info['time_matching'] = time.time()
-        dis_junc_to_end1, idx_junc_to_end1 = torch.sum((lines_pred[:,:2]-juncs_pred[:,None])**2,dim=-1).min(0)
-        dis_junc_to_end2, idx_junc_to_end2 = torch.sum((lines_pred[:,2:] - juncs_pred[:, None]) ** 2, dim=-1).min(0)
+        juncs_pred, juncs_scores = get_junctions(nms_jloc_pred, joff_pred[0], topk=300, th=0.008)
+
+        return self.f(juncs_pred, juncs_scores, lines_pred, loi_features, output)
+
+    @torch.jit.export
+    def f(self, juncs_pred, juncs_score_pred, lines_pred, loi_features, output):
+        if juncs_pred.numel() == 0 or lines_pred.numel() == 0:
+            return torch.empty(0, 2, dtype=torch.float32), torch.empty((0,), dtype=torch.float32), \
+                   torch.empty(0, 2, dtype=torch.long), torch.empty((0,), dtype=torch.float32), \
+                   torch.tensor(output.size(3)), torch.tensor(output.size(2))
+
+        dis_junc_to_end1, idx_junc_to_end1 = torch.sum((lines_pred[:, :2] - juncs_pred[:, None]) ** 2, dim=-1).min(0)
+        dis_junc_to_end2, idx_junc_to_end2 = torch.sum((lines_pred[:, 2:] - juncs_pred[:, None]) ** 2, dim=-1).min(0)
 
         # idx_junc_to_end_min = torch.min(idx_junc_to_end1,idx_junc_to_end2)
         # idx_junc_to_end_max = torch.max(idx_junc_to_end1,idx_junc_to_end2)
@@ -130,42 +128,36 @@ class WireframeDetector(nn.Module):
         idx_junc_to_end_min = idx_junc_to_end_stacked.min(dim=0)[0]
         idx_junc_to_end_max = idx_junc_to_end_stacked.max(dim=0)[0]
 
-        iskeep = (idx_junc_to_end_min < idx_junc_to_end_max)# * (dis_junc_to_end1< 10*10)*(dis_junc_to_end2<10*10)  # *(dis_junc_to_end2<100)
+        iskeep = (
+                    idx_junc_to_end_min < idx_junc_to_end_max)  # * (dis_junc_to_end1< 10*10)*(dis_junc_to_end2<10*10)  # *(dis_junc_to_end2<100)
 
         idx_lines_for_junctions = torch.unique(
-            torch.cat((idx_junc_to_end_min[iskeep,None],idx_junc_to_end_max[iskeep,None]),dim=1),
+            torch.cat((idx_junc_to_end_min[iskeep, None], idx_junc_to_end_max[iskeep, None]), dim=1),
             dim=0)
-        lines_adjusted = torch.cat((juncs_pred[idx_lines_for_junctions[:,0]], juncs_pred[idx_lines_for_junctions[:,1]]),dim=1)
-        extra_info['time_matching'] = time.time() - extra_info['time_matching']
+        lines_adjusted = torch.cat(
+            (juncs_pred[idx_lines_for_junctions[:, 0]], juncs_pred[idx_lines_for_junctions[:, 1]]), dim=1)
 
-        extra_info['time_verification'] = time.time()
-        scores = self.pooling(loi_features[0],lines_adjusted).sigmoid()
+        scores = self.pooling(loi_features[0], lines_adjusted).sigmoid()
 
-        lines_final = lines_adjusted[scores>0.05]
-        score_final = scores[scores>0.05]
+        lines_final = lines_adjusted[scores > 0.05]
+        score_final = scores[scores > 0.05]
         if score_final.numel() == 0:
-            wireframe = None
+            return torch.empty(0, 2, dtype=torch.float32), torch.empty((0,), dtype=torch.float32), \
+                   torch.empty(0, 2, dtype=torch.long), torch.empty((0,), dtype=torch.float32), \
+                   torch.tensor(output.size(3)), torch.tensor(output.size(2))
         else:
-            juncs_final = juncs_pred[idx_lines_for_junctions.unique()]
-            juncs_score = _[idx_lines_for_junctions.unique()]
+            unique_idx_lines_for_junctions = torch.unique(idx_lines_for_junctions)
+            juncs_final = juncs_pred[unique_idx_lines_for_junctions]
+            juncs_score = juncs_score_pred[unique_idx_lines_for_junctions]
 
-            v2e_dis1 =  ((juncs_final[:,None] - lines_final[None,:,:2])**2).sum(dim=-1)
-            v2e_dis2 =  ((juncs_final[:,None] - lines_final[None,:,2:])**2).sum(dim=-1)
-            if v2e_dis1.numel() == 0:
-                import pdb; pdb.set_trace()
+            v2e_dis1 = ((juncs_final[:, None] - lines_final[None, :, :2]) ** 2).sum(dim=-1)
+            v2e_dis2 = ((juncs_final[:, None] - lines_final[None, :, 2:]) ** 2).sum(dim=-1)
             v2e_idx1 = v2e_dis1.argmin(dim=0)
             v2e_idx2 = v2e_dis2.argmin(dim=0)
-            edge_indices = torch.stack((v2e_idx1,v2e_idx2)).t()
+            edge_indices = torch.stack((v2e_idx1, v2e_idx2)).t()
 
-            if not self.export_mode:
-                wireframe = WireframeGraph(juncs_final,juncs_score,edge_indices,score_final,output.size(3),output.size(2))
-                wireframe.rescale(annotations[0]['width'],annotations[0]['height'])
-            else:
-                return juncs_final,juncs_score,edge_indices,score_final,output.size(3),output.size(2)
-
-        extra_info['time_verification'] = time.time() - extra_info['time_verification']
-
-        return wireframe, extra_info
+            return juncs_final, juncs_score, edge_indices, score_final, torch.tensor(output.size(3)), torch.tensor(
+                output.size(2))
 
     def proposal_lines(self, md_maps, dis_maps, scale=5.0):
         """
@@ -281,5 +273,3 @@ def get_hawp_model(pretrained = False):
         model = model.eval()
         return model
     return model
-
-        
