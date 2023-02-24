@@ -48,8 +48,8 @@ def post_jheatmap(heatmap, offset=None, delta=1):
     return v0
 
 def add_argument_with_cfg(parser, cfg, arg_name, cfg_name, help, mapping):
-    
-    parser.add_argument('--{}'.format(arg_name.replace('_','-')), 
+
+    parser.add_argument('--{}'.format(arg_name.replace('_','-')),
         default = eval('cfg.{}'.format(cfg_name)),
         type = type(eval('cfg.{}'.format(cfg_name))),
         help = help
@@ -84,7 +84,7 @@ class WireframeDetector(nn.Module):
         add_argument_lambda = lambda arg_name, cfg_name, help: add_argument_with_cfg(hafm_parser, cfg, arg_name, cfg_name, help, mapping=cfg_mapping)
         add_argument_lambda('num_residuals', 'MODEL.PARSING_HEAD.USE_RESIDUAL', help='[all] the number of distance residuals')
         self.cfg_mapping = cfg_mapping
-        
+
     def configure(self, cfg, args):
         configure_list = []
         for key, value in self.cfg_mapping.items():
@@ -118,13 +118,13 @@ class WireframeDetector(nn.Module):
         self.use_residual = int(cfg.MODEL.PARSING_HEAD.USE_RESIDUAL)
 
         self.register_buffer('tspan', torch.linspace(0, 1, self.n_pts0)[None,None,:].cuda())
-        
+
         assert cfg.MODEL.LOI_POOLING.TYPE in ['softmax', 'sigmoid']
         assert cfg.MODEL.LOI_POOLING.ACTIVATION in ['relu', 'gelu']
 
         self.loi_cls_type = cfg.MODEL.LOI_POOLING.TYPE
         self.loi_layer_norm = cfg.MODEL.LOI_POOLING.LAYER_NORM
-        self.loi_activation = nn.ReLU if cfg.MODEL.LOI_POOLING.ACTIVATION == 'relu' else nn.GELU        
+        self.loi_activation = nn.ReLU if cfg.MODEL.LOI_POOLING.ACTIVATION == 'relu' else nn.GELU
 
         self.fc1 = nn.Conv2d(256, self.dim_junction_feature, 1)
 
@@ -139,7 +139,7 @@ class WireframeDetector(nn.Module):
             fc2.append(self.loi_activation())
             fc2.append(nn.Linear(self.dim_fc,self.dim_fc))
 
-        
+
         self.fc2 = nn.Sequential(*fc2)
         self.fc2_res = nn.Sequential(nn.Linear(2*(self.n_pts0-2)*self.dim_edge_feature, self.dim_fc),self.loi_activation())
 
@@ -165,7 +165,7 @@ class WireframeDetector(nn.Module):
     def bilinear_sampling(self, features, points):
         h,w = features.size(1), features.size(2)
         px, py = points[:,0], points[:,1]
-        
+
         px0 = px.floor().clamp(min=0, max=w-1)
         py0 = py.floor().clamp(min=0, max=h-1)
         px1 = (px0 + 1).clamp(min=0, max=w-1)
@@ -174,12 +174,12 @@ class WireframeDetector(nn.Module):
         xp = features[:, py0l, px0l] * (py1-py) * (px1 - px)+ features[:, py1l, px0l] * (py - py0) * (px1 - px)+ features[:, py0l, px1l] * (py1 - py) * (px - px0)+ features[:, py1l, px1l] * (py - py0) * (px - px0)
 
         return xp
-    
+
     def get_line_points(self, lines_per_im):
         U,V = lines_per_im[:,:2], lines_per_im[:,2:]
         sampled_points = U[:,:,None]*self.tspan + V[:,:,None]*(1-self.tspan) -0.5
         return sampled_points
-    
+
     def compute_loi_features(self, features_per_image, lines_per_im):
         num_channels = features_per_image.shape[0]
         h,w = features_per_image.size(1), features_per_image.size(2)
@@ -199,11 +199,11 @@ class WireframeDetector(nn.Module):
 
         return xp.flatten(1)
     def pooling(self, features_per_line):
-        
+
         if self.training:
             logits = self.fc2(features_per_line)
             return logits
-        
+
         if self.loi_cls_type == 'softmax':
             return self.fc2(features_per_line).softmax(dim=-1)[:,1]
         else:
@@ -214,25 +214,30 @@ class WireframeDetector(nn.Module):
             return self.forward_train(images, annotations=annotations)
         else:
             return self.forward_test(images, annotations=annotations)
-        
+
     def wireframe_matcher(self, juncs_pred, lines_pred, is_train=False,return_index=False):
         cost1 = torch.sum((lines_pred[:,:2]-juncs_pred[:,None])**2,dim=-1)
         cost2 = torch.sum((lines_pred[:,2:]-juncs_pred[:,None])**2,dim=-1)
-        
+
         dis1, idx_junc_to_end1 = cost1.min(dim=0)
         dis2, idx_junc_to_end2 = cost2.min(dim=0)
-        length = torch.sum((lines_pred[:,:2]-lines_pred[:,2:])**2,dim=-1)
+        # length = torch.sum((lines_pred[:,:2]-lines_pred[:,2:])**2,dim=-1)
 
+        # idx_junc_to_end_min = torch.min(idx_junc_to_end1,idx_junc_to_end2)
+        # idx_junc_to_end_max = torch.max(idx_junc_to_end1,idx_junc_to_end2)
 
-        idx_junc_to_end_min = torch.min(idx_junc_to_end1,idx_junc_to_end2)
-        idx_junc_to_end_max = torch.max(idx_junc_to_end1,idx_junc_to_end2)
+        idx_junc_to_end_stacked = torch.stack((idx_junc_to_end1, idx_junc_to_end2))
+        idx_junc_to_end_min = idx_junc_to_end_stacked.min(dim=0)[0]
+        idx_junc_to_end_max = idx_junc_to_end_stacked.max(dim=0)[0]
 
-        iskeep = idx_junc_to_end_min < idx_junc_to_end_max
-        if self.j2l_threshold>0:
-            iskeep *= (dis1<self.j2l_threshold)*(dis2<self.j2l_threshold)
-        
+        if self.j2l_threshold > 0:
+            mask = torch.logical_and(dis1 < self.j2l_threshold, dis2 < self.j2l_threshold)
+            iskeep = torch.logical_and(idx_junc_to_end_min < idx_junc_to_end_max, mask)
+        else:
+            iskeep = idx_junc_to_end_min < idx_junc_to_end_max
+
         idx_lines_for_junctions = torch.stack((idx_junc_to_end_min[iskeep],idx_junc_to_end_max[iskeep]),dim=1)#.unique(dim=0)
-        
+
         idx_lines_for_junctions, inverse = torch.unique(idx_lines_for_junctions,sorted=True,return_inverse=True,dim=0)
 
         perm = torch.arange(inverse.size(0), dtype=inverse.dtype, device=inverse.device)
@@ -243,12 +248,12 @@ class WireframeDetector(nn.Module):
             idx_lines_for_junctions_mirror = torch.cat((idx_lines_for_junctions[:,1,None],idx_lines_for_junctions[:,0,None]),dim=1)
             idx_lines_for_junctions = torch.cat((idx_lines_for_junctions, idx_lines_for_junctions_mirror))
         lines_adjusted = juncs_pred[idx_lines_for_junctions].reshape(-1,4)
-        
+
         if return_index:
             return lines_adjusted, lines_init, perm, idx_lines_for_junctions
         else:
             return lines_adjusted, lines_init, perm
-    
+
     def junction_detection(self, images, annotations = None):
         device = images.device
 
@@ -264,7 +269,7 @@ class WireframeDetector(nn.Module):
         output = outputs[0]
         jloc_pred= output[:,5:7].softmax(1)[:,1:]
         jloc_logits = output[:,5:7].softmax(1)
-        joff_pred= output[:,7:9].sigmoid()-0.5 
+        joff_pred= output[:,7:9].sigmoid()-0.5
 
         width = annotations[0]['width']
         height = annotations[0]['height']
@@ -304,7 +309,7 @@ class WireframeDetector(nn.Module):
 
         loi_features = self.fc1(features)
         loi_features_thin = self.fc3(features)
-        
+
         loi_features_aux = self.fc4(features)
         output = outputs[0]
         md_pred = output[:,:3].sigmoid()
@@ -316,27 +321,20 @@ class WireframeDetector(nn.Module):
 
         extra_info['time_backbone'] = time.time() - extra_info['time_backbone']
 
-        batch_size = md_pred.size(0)
-        assert batch_size == 1
-        
         extra_info['time_proposal'] = time.time()
-        
-        lines_pred = self.hafm_decoding(md_pred, dis_pred, res_pred if self.use_residual else None, scale=self.hafm_encoder.dis_th)
-        
-        lines_pred = lines_pred.reshape(-1,4)
-    
-        jloc_pred_nms = non_maximum_suppression(jloc_pred[0])
 
-        topK = min(self.topk_junctions, int((jloc_pred_nms>0.008).float().sum().item()))
-        
-        juncs_pred, _ = get_junctions(non_maximum_suppression(jloc_pred[0]),joff_pred[0], topk=topK,th=0.008)
+        lines_pred = self.hafm_decoding(md_pred, dis_pred, res_pred if self.use_residual else None, scale=self.hafm_encoder.dis_th)
+
+        lines_pred = lines_pred.reshape(-1,4)
+
+        nms_jloc_pred = non_maximum_suppression(jloc_pred)[0]
+        juncs_pred, juncs_score = get_junctions(nms_jloc_pred, joff_pred[0], topk=self.topk_junctions, th=0.008)
 
         extra_info['time_proposal'] = time.time() - extra_info['time_proposal']
         extra_info['time_matching'] = time.time()
-        
-        
-        grid = torch.stack(torch.meshgrid(torch.arange(loi_features.shape[2],device=device),torch.arange(loi_features.shape[3],device=device),indexing='xy'),dim=-1).unsqueeze(0).repeat(2*self.use_residual+1,1,1,1).reshape(-1,2)
-        
+
+        # grid = torch.stack(torch.meshgrid(torch.arange(loi_features.shape[2],device=device),torch.arange(loi_features.shape[3],device=device),indexing='xy'),dim=-1).unsqueeze(0).repeat(2*self.use_residual+1,1,1,1).reshape(-1,2)
+
         lines_adjusted, lines_init, perm, unique_indices = self.wireframe_matcher(juncs_pred, lines_pred,return_index=True)
         extra_info['time_matching'] = time.time() - extra_info['time_matching']
         extra_info['time_verification'] = time.time()
@@ -353,22 +351,28 @@ class WireframeDetector(nn.Module):
             scores = logits.softmax(dim=-1)[:,1]
         else:
             scores = logits.sigmoid()[:,0]
-        
-        sarg = torch.argsort(scores,descending=True)
 
-        lines_final = lines_adjusted[sarg]
-        score_final = scores[sarg]
-        lines_before = lines_init[sarg]
-            
-        num_detection = min((score_final>0.0).sum(),1000)
-        lines_final = lines_final[:num_detection]
-        lines_before = lines_before[:num_detection]
-        score_final = score_final[:num_detection]
+        score_topk, score_index = torch.topk(scores, k=1000, sorted=True)
+        idx = score_index[:(score_topk > 0).nonzero().max() + 1]
+
+        score_final = scores[idx]
+        lines_final = lines_adjusted[idx]
+        lines_before = lines_init[idx]
 
         # unique_indices = unique_indices.unique()
         juncs_final = juncs_pred
-        juncs_score = _
+        # juncs_score = juncs_score
         # juncs_score = _#[idx_lines_for_junctions.unique()]
+
+        if self.export_mode:
+            lines_pred = lines_final
+            juncs_pred = juncs_final
+            sq_dist1 = ((juncs_pred[:, None] - lines_pred[None, :, :2]) ** 2).sum(dim=-1)
+            sq_dist2 = ((juncs_pred[:, None] - lines_pred[None, :, 2:]) ** 2).sum(dim=-1)
+            idx1 = sq_dist1.argmin(dim=0)
+            idx2 = sq_dist2.argmin(dim=0)
+            edges = torch.stack((idx1, idx2)).t()
+            return juncs_final, juncs_score, edges, score_final, output.size(3), output.size(2)
 
         extra_info['time_verification'] = time.time() - extra_info['time_verification']
 
@@ -381,7 +385,7 @@ class WireframeDetector(nn.Module):
         lines_before *= line_scale_vec
 
         juncs_final *= line_scale_vec[:,:2]
-        
+
         output = {
             'lines_pred': lines_final,
             'lines_init': lines_before,
@@ -397,12 +401,12 @@ class WireframeDetector(nn.Module):
         return output, extra_info
 
     def focal_loss(self,input, target, gamma=2.0):
-        prob = F.softmax(input, 1) 
+        prob = F.softmax(input, 1)
         ce_loss = F.cross_entropy(input, target,  reduction='none')
         p_t = prob[:,1] * target + prob[:,0] * (1 - target)
         loss = ce_loss * ((1 - p_t) ** gamma)
         return loss
-    
+
     def refinement_train(self, lines_batch, jloc_pred, joff_pred, loi_features, loi_features_thin, loi_features_aux, metas):
         loss_dict = defaultdict(float)
         extra_info = defaultdict(float)
@@ -411,11 +415,11 @@ class WireframeDetector(nn.Module):
         resinds = torch.arange(-self.use_residual,self.use_residual+1,device=device).reshape(-1,1,1).repeat(1,lines_batch.shape[2],lines_batch.shape[3]).reshape(-1)
 
         grid = torch.stack(torch.meshgrid(torch.arange(lines_batch.shape[2],device=device),torch.arange(lines_batch.shape[3],device=device),indexing='xy'),dim=-1).unsqueeze(0).repeat(2*self.use_residual+1,1,1,1).reshape(-1,2)
-        
+
         for i, meta in enumerate(metas):
             lines_pred = lines_batch[i].reshape(-1,4).detach()
-            
-            
+
+
             junction_gt = meta['junc']
             lines_gt = meta['lines']
 
@@ -430,19 +434,19 @@ class WireframeDetector(nn.Module):
             extra_info['recall_hafm-15'] += ((mcost<15).float().mean())
 
             lines_pred_labels = (lines_matching_cost.min(dim=1)[0]<15).float()
-            
-            
+
+
             lines_pred_feat = self.compute_loi_features(loi_features_aux[i],lines_pred.detach())
             lines_pred_logits = self.line_mlp(lines_pred_feat).flatten()
-            
+
             loss_dict['loss_lineness'] += self.bce_loss(lines_pred_logits,lines_pred_labels.float()).mean()/batch_size
-            
-            N = junction_gt.size(0)   
+
+            N = junction_gt.size(0)
 
             juncs_pred, _ = get_junctions(non_maximum_suppression(jloc_pred[i]),joff_pred[i], topk=min(N*2+2,self.n_dyn_junc))
             dis_junc_to_end1, idx_junc_to_end1 = torch.sum((lines_pred[:,:2]-juncs_pred[:,None])**2,dim=-1).min(0)
             dis_junc_to_end2, idx_junc_to_end2 = torch.sum((lines_pred[:, 2:] - juncs_pred[:, None]) ** 2, dim=-1).min(0)
-            
+
 
             idx_junc_to_end_min = torch.min(idx_junc_to_end1,idx_junc_to_end2)
             idx_junc_to_end_max = torch.max(idx_junc_to_end1,idx_junc_to_end2)
@@ -455,11 +459,11 @@ class WireframeDetector(nn.Module):
             perm = torch.arange(inverse.size(0), dtype=inverse.dtype, device=inverse.device)
             inverse, perm = inverse.flip([0]), perm.flip([0])
             perm = inverse.new_empty(idx_lines_for_junctions.size(0)).scatter_(0, inverse, perm)
-            
+
 
             lines_init     = lines_pred[iskeep][perm]
             lines_adjusted = torch.cat((juncs_pred[idx_lines_for_junctions[:,0]], juncs_pred[idx_lines_for_junctions[:,1]]),dim=1)
-            
+
             lines_matching_cost = torch.min(
                 torch.sum((lines_adjusted[:,None]-lines_gt)**2,dim=-1),
                 torch.sum((lines_adjusted[:,None]-lines_gt[:,[2,3,0,1]])**2,dim=-1),
@@ -469,19 +473,19 @@ class WireframeDetector(nn.Module):
             extra_info['recall_adjust-05'] += ((mcost<5).float().mean())
             extra_info['recall_adjust-10'] += ((mcost<10).float().mean())
             extra_info['recall_adjust-15'] += ((mcost<15).float().mean())
-            
+
             cost_, match_ = torch.sum((juncs_pred-junction_gt[:,None])**2,dim=-1).min(0)
-            
+
             match_[cost_>1.5*1.5] = N
             Lpos = meta['Lpos']
             Lneg = meta['Lneg']
             labels = Lpos[match_[idx_lines_for_junctions[:,0]],match_[idx_lines_for_junctions[:,1]]]
-            
+
 
             lines_for_train = lines_adjusted
             lines_for_train_init = lines_init
 
-            
+
             labels_for_train = labels
 
             lines_for_train = torch.cat((lines_for_train,meta['lpre']))
@@ -500,7 +504,7 @@ class WireframeDetector(nn.Module):
                 loss_ = self.loss(logits.flatten(), labels_for_train)
             else:
                 loss_ = self.loss(logits, labels_for_train.long())
-            
+
             if (labels_for_train==1).sum() == 0:
                 loss_positive = torch.zeros_like(loss_[labels_for_train==1].mean())
             else:
@@ -518,7 +522,7 @@ class WireframeDetector(nn.Module):
 
         self.train_step += 1
 
-        
+
         outputs, features = self.backbone(images)
 
         loss_dict = {
@@ -534,7 +538,7 @@ class WireframeDetector(nn.Module):
 
         extra_info = defaultdict(list)
 
-                
+
         loi_features = self.fc1(features)
         loi_features_thin = self.fc3(features)
         loi_features_aux = self.fc4(features)
@@ -544,15 +548,15 @@ class WireframeDetector(nn.Module):
         res_pred = output[:,4:5].sigmoid()
         jloc_pred= output[:,5:7].softmax(1)[:,1:]
         joff_pred= output[:,7:9].sigmoid() - 0.5
-        
+
 
         batch_size = md_pred.size(0)
 
         lines_batch = self.hafm_decoding(md_pred, dis_pred, res_pred if self.use_residual else None, flatten=False, scale=self.hafm_encoder.dis_th)
-        
+
         loss_dict_, extra_info = self.refinement_train(lines_batch, jloc_pred, joff_pred, loi_features, loi_features_thin,loi_features_aux, metas)
 
-        
+
         loss_dict['loss_pos'] += loss_dict_['loss_pos']
         loss_dict['loss_neg'] += loss_dict_['loss_neg']
         loss_dict['loss_lineness'] = loss_dict_['loss_lineness']
@@ -570,14 +574,14 @@ class WireframeDetector(nn.Module):
             mask2.append(temp_mask)
         mask2 = torch.stack(mask2)
 
-        
+
         lines_tgt = lines_tgt.repeat((1,2*self.use_residual+1,1,1,1))
         lines_len = torch.sum((lines_tgt[...,:2]-lines_tgt[...,2:])**2,dim=-1)
 
         if targets is not None:
             for nstack, output in enumerate(outputs):
                 loss_map = torch.mean(F.l1_loss(output[:,:3].sigmoid(), targets['md'],reduction='none'),dim=1,keepdim=True)
-                
+
                 loss_dict['loss_md']  += torch.mean(loss_map*mask) / torch.mean(mask)
                 loss_map = F.l1_loss(output[:,3:4].sigmoid(), targets['dis'], reduction='none')
                 loss_dict['loss_dis'] += torch.mean(loss_map*mask) /torch.mean(mask)
@@ -587,12 +591,12 @@ class WireframeDetector(nn.Module):
                 loss_dict['loss_joff'] += sigmoid_l1_loss(output[:,7:9], targets['joff'], -0.5, targets['jloc'])
 
                 lines_learned = self.hafm_decoding(output[:,:3].sigmoid(), output[:,3:4].sigmoid(), output[:,4:5].sigmoid() if self.use_residual else None, flatten=False, scale=self.hafm_encoder.dis_th)
-                
+
                 wt = 1/lines_len.clamp_min(1.0)*mask2
                 loss_map = F.l1_loss(lines_learned, lines_tgt,reduction='none').mean(dim=-1)
-                
+
                 loss_dict['loss_aux'] += torch.mean(loss_map*wt)/torch.mean(mask)
-                
+
         for key in extra_info.keys():
             extra_info[key] = extra_info[key]/batch_size
 
@@ -608,7 +612,7 @@ class WireframeDetector(nn.Module):
         y0, x0 =torch.meshgrid(_y, _x,indexing='ij')
         y0 = y0.reshape(1,1,-1)
         x0 = x0.reshape(1,1,-1)
-        
+
         sign_pad = torch.arange(-self.use_residual,self.use_residual+1,device=device,dtype=torch.float32).reshape(1,-1,1)
 
         if residual_maps is not None:
@@ -619,7 +623,7 @@ class WireframeDetector(nn.Module):
             distance_fields = dis_maps.reshape(batch_size,1,-1)
             scores = scores.reshape(batch_size,1,-1)
         md_maps = md_maps.reshape(batch_size,3,-1)
-        
+
         distance_fields = distance_fields.clamp(min=0,max=1.0)
         md_un = (md_maps[:,:1] - 0.5)*np.pi*2
         st_un = md_maps[:,1:2]*np.pi/2.0
@@ -643,15 +647,15 @@ class WireframeDetector(nn.Module):
         x_ed_final = (x_ed_rotated + x0).clamp(min=0,max=width-1)
         y_ed_final = (y_ed_rotated + y0).clamp(min=0,max=height-1)
 
-        
+
         lines = torch.stack((x_st_final,y_st_final,x_ed_final,y_ed_final),dim=-1)
 
         lines = lines.reshape(batch_size,-1,4)
         scores = scores.reshape(batch_size,-1)
-        
+
         sc_, arg_ = scores[0].sort(descending=True)
         lines_out = lines[0][arg_[sc_>0]]
-        
+
         return lines_out, sc_[sc_>0]
 
     def hafm_decoding(self, md_maps, dis_maps, residual_maps, scale=5.0, flatten = True):
@@ -664,7 +668,7 @@ class WireframeDetector(nn.Module):
         y0, x0 =torch.meshgrid(_y, _x,indexing='ij')
         y0 = y0[None,None]
         x0 = x0[None,None]
-        
+
         sign_pad = torch.arange(-self.use_residual,self.use_residual+1,device=device,dtype=torch.float32).reshape(1,-1,1,1)
 
         if residual_maps is not None:
@@ -695,7 +699,7 @@ class WireframeDetector(nn.Module):
         x_ed_final = (x_ed_rotated + x0).clamp(min=0,max=width-1)
         y_ed_final = (y_ed_rotated + y0).clamp(min=0,max=height-1)
 
-        
+
         lines = torch.stack((x_st_final,y_st_final,x_ed_final,y_ed_final),dim=-1)
         if flatten:
             lines = lines.reshape(batch_size,-1,4)
@@ -717,4 +721,4 @@ def get_hawp_model(pretrained = False):
         return model
     return model
 
-        
+
